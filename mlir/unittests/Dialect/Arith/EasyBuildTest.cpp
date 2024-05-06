@@ -562,3 +562,46 @@ TEST_F(ArithTest, EasyBuildFloatOperatorsRHSConst) {
 })mlir";
   ASSERT_EQ(out, expected);
 }
+
+// check wrap<T>()
+TEST_F(ArithTest, EasyBuildCheckWrap) {
+  OpBuilder builder{&context};
+  auto loc = builder.getUnknownLoc();
+  EasyBuilder b{builder, loc};
+  auto func = builder.create<func::FuncOp>(
+      loc, "funcname",
+      FunctionType::get(&context,
+                        {MemRefType::get({100}, IntegerType::get(&context, 16)),
+                         IntegerType::get(&context, 16)},
+                        {}));
+
+  builder.setInsertionPointToStart(func.addEntryBlock());
+  // arg0 is of memref type
+  auto arg0 = func.getArgument(0);
+  EBValue wb = b(arg0); // check that it is ok to wrap generic value to EBValue
+  auto expectedFail = b.wrapOrFail<EBFloatPoint>(arg0);
+  ASSERT_TRUE(failed(expectedFail));
+
+
+  auto arg1 = func.getArgument(1);
+  auto expectedFail1 = b.wrapOrFail<EBFloatPoint>(arg1);
+  ASSERT_TRUE(failed(expectedFail1));
+  auto expectedOK1 = b.wrapOrFail<EBUnsigned>(arg1);
+  ASSERT_TRUE(succeeded(expectedOK1));
+  EBUnsigned u = b.wrap<EBUnsigned>(arg1);
+
+  OpFoldResult foldresult = arg1;
+  expectedFail1 = b.wrapOrFail<EBFloatPoint>(foldresult);
+  ASSERT_TRUE(failed(expectedFail1));
+  expectedOK1 = b.wrapOrFail<EBUnsigned>(foldresult);
+  ASSERT_TRUE(succeeded(expectedOK1));
+  u = b.wrap<EBUnsigned>(foldresult);
+
+  foldresult = builder.getIndexAttr(123);
+  expectedFail1 = b.wrapOrFail<EBFloatPoint>(foldresult);
+  ASSERT_TRUE(failed(expectedFail1));
+  expectedOK1 = b.wrapOrFail<EBUnsigned>(foldresult);
+  ASSERT_TRUE(succeeded(expectedOK1));
+  u = b.wrap<EBUnsigned>(foldresult);
+
+}
