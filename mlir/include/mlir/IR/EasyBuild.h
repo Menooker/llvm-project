@@ -43,9 +43,13 @@ struct EBValue {
   EBValue(const impl::StatePtr &builder, Value v) : builder{builder}, v{v} {}
   Value get() const { return v; }
   operator Value() const { return v; }
+
+  static FailureOr<EBValue> wrapOrFail(const impl::StatePtr& state, Value v) {
+    return EBValue{state, v};
+  }
 };
 
-struct DefaultArithWrapper;
+struct EBArithValue;
 
 struct EasyBuilder {
   std::shared_ptr<impl::EasyBuildState> builder;
@@ -70,16 +74,24 @@ struct EasyBuilder {
     return *ret;
   }
 
-  EBValue operator()(Value v) const { return EBValue{builder, v}; }
-
   template <typename V>
   auto operator()(V &&v) {
-    return wrap<DefaultArithWrapper>(std::forward<V>(v));
+    if constexpr (std::is_convertible_v<V, Value>) {
+        return EBValue{builder, std::forward<V>(v)};
+    } else {
+        return wrap<EBArithValue>(std::forward<V>(v));
+    }
   }
 
-  template <typename W = DefaultArithWrapper>
+  template <typename W = EBArithValue>
   auto toIndex(uint64_t v) const {
     return W::toIndex(builder, v);
+  }
+
+  template <typename OP, typename OutT = EBValue, typename... Args>
+  auto F(Args &&...v) {
+    return wrap<OutT>(
+        builder->builder.create<OP>(builder->loc, std::forward<Args>(v)...));
   }
 };
 

@@ -49,7 +49,15 @@ inline Type getElementType(Value v) {
 
 } // namespace impl
 
+struct EBUnsigned;
+
 struct EBArithValue : public EBValue {
+  template <typename T = EBUnsigned>
+  static T toIndex(const impl::StatePtr &state, uint64_t v);
+
+  template <typename T>
+  static auto wrapOrFail(const impl::StatePtr &state, T &&v);
+
 protected:
   using EBValue::EBValue;
 };
@@ -80,7 +88,7 @@ struct EBUnsigned : public EBArithValue {
     }
     return failure();
   }
-  friend struct DefaultArithWrapper;
+  friend struct EBArithValue;
   friend struct OperatorHandlers;
 
 protected:
@@ -106,7 +114,7 @@ struct EBSigned : EBArithValue {
                                  state->loc, val.getInt(), val.getType())};
     return failure();
   }
-  friend struct DefaultArithWrapper;
+  friend struct EBArithValue;
   friend struct OperatorHandlers;
 
 protected:
@@ -134,56 +142,51 @@ struct EBFloatPoint : EBArithValue {
                                      val.getType().cast<FloatType>())};
     return failure();
   }
-  friend struct DefaultArithWrapper;
+  friend struct EBArithValue;
   friend struct OperatorHandlers;
 
 protected:
   using EBArithValue::EBArithValue;
 };
 
-struct DefaultArithWrapper {
-  static EBUnsigned toIndex(const impl::StatePtr &state, uint64_t v) {
-    return EBUnsigned{
-        state, state->builder.create<arith::ConstantIndexOp>(state->loc, v)};
-  }
+template <typename T>
+inline T EBArithValue::toIndex(const impl::StatePtr &state, uint64_t v) {
+  return EBUnsigned{
+      state, state->builder.create<arith::ConstantIndexOp>(state->loc, v)};
+}
 
-  template <typename T>
-  static auto wrapOrFail(const impl::StatePtr &state, T &&v) {
-    using DT = std::decay_t<T>;
-    if constexpr (std::is_convertible_v<DT, Value>) {
-      return FailureOr<EBValue>{EBValue{state, std::forward<T>(v)}};
-    } else {
-      static_assert(std::is_arithmetic_v<DT>, "Expecting arithmetic types");
-      if constexpr (std::is_same_v<DT, uint64_t>) {
-        if (state->u64AsIndex) {
-          return FailureOr<EBUnsigned>{toIndex(state, v)};
-        }
-      }
-
-      if constexpr (std::is_same_v<DT, bool>) {
-        return FailureOr<EBUnsigned>{
-            EBUnsigned{state, state->builder.create<arith::ConstantIntOp>(
-                                  state->loc, static_cast<int64_t>(v), 1)}};
-      } else if constexpr (std::is_integral_v<DT>) {
-        if constexpr (!std::is_signed_v<DT>) {
-          return FailureOr<EBUnsigned>{EBUnsigned{
-              state, state->builder.create<arith::ConstantIntOp>(
-                         state->loc, static_cast<int64_t>(v), sizeof(T) * 8)}};
-        } else {
-          return FailureOr<EBSigned>{EBSigned{
-              state, state->builder.create<arith::ConstantIntOp>(
-                         state->loc, static_cast<int64_t>(v), sizeof(T) * 8)}};
-        }
-      } else {
-        using DType = typename impl::ToFloatType<sizeof(DT)>::type;
-        return FailureOr<EBFloatPoint>{
-            EBFloatPoint{state, state->builder.create<arith::ConstantFloatOp>(
-                                    state->loc, APFloat{v},
-                                    DType::get(state->builder.getContext()))}};
-      }
+template <typename T>
+inline auto EBArithValue::wrapOrFail(const impl::StatePtr &state, T &&v) {
+  using DT = std::decay_t<T>;
+  static_assert(std::is_arithmetic_v<DT>, "Expecting arithmetic types");
+  if constexpr (std::is_same_v<DT, uint64_t>) {
+    if (state->u64AsIndex) {
+      return FailureOr<EBUnsigned>{toIndex(state, v)};
     }
   }
-};
+
+  if constexpr (std::is_same_v<DT, bool>) {
+    return FailureOr<EBUnsigned>{
+        EBUnsigned{state, state->builder.create<arith::ConstantIntOp>(
+                              state->loc, static_cast<int64_t>(v), 1)}};
+  } else if constexpr (std::is_integral_v<DT>) {
+    if constexpr (!std::is_signed_v<DT>) {
+      return FailureOr<EBUnsigned>{EBUnsigned{
+          state, state->builder.create<arith::ConstantIntOp>(
+                     state->loc, static_cast<int64_t>(v), sizeof(T) * 8)}};
+    } else {
+      return FailureOr<EBSigned>{EBSigned{
+          state, state->builder.create<arith::ConstantIntOp>(
+                     state->loc, static_cast<int64_t>(v), sizeof(T) * 8)}};
+    }
+  } else {
+    using DType = typename impl::ToFloatType<sizeof(DT)>::type;
+    return FailureOr<EBFloatPoint>{
+        EBFloatPoint{state, state->builder.create<arith::ConstantFloatOp>(
+                                state->loc, APFloat{v},
+                                DType::get(state->builder.getContext()))}};
+  }
+}
 
 struct OperatorHandlers {
   template <typename OP, typename V>

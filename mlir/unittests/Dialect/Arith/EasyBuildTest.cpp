@@ -605,3 +605,35 @@ TEST_F(ArithTest, EasyBuildCheckWrap) {
   u = b.wrap<EBUnsigned>(foldresult);
 
 }
+
+TEST_F(ArithTest, EasyBuildCheckOpCall) {
+  OpBuilder builder{&context};
+  auto loc = builder.getUnknownLoc();
+  EasyBuilder b{builder, loc};
+  auto func = builder.create<func::FuncOp>(
+      loc, "funcname",
+      FunctionType::get(&context,
+                        {IntegerType::get(&context, 16)},
+                        {}));
+
+  builder.setInsertionPointToStart(func.addEntryBlock());
+  
+  auto arg0 = func.getArgument(0);
+  auto v = b.wrap<EBUnsigned>(arg0);
+  auto v2 =  b.F<arith::MinUIOp, EBUnsigned>(v, b(uint16_t(1)));
+  v2 =  b.F<arith::MaxUIOp, EBUnsigned>(v2, b(uint16_t(100)));
+  builder.create<func::ReturnOp>(loc);
+
+  const char *expected =
+      R"mlir(func.func @funcname(%arg0: i16) {
+  %c1_i16 = arith.constant 1 : i16
+  %0 = arith.minui %arg0, %c1_i16 : i16
+  %c100_i16 = arith.constant 100 : i16
+  %1 = arith.maxui %0, %c100_i16 : i16
+  return
+})mlir";
+  std::string out;
+  llvm::raw_string_ostream os{out};
+  os << func;
+  ASSERT_EQ(out, expected);
+}
