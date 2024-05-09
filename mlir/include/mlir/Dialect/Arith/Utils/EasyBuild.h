@@ -58,6 +58,15 @@ struct EBArithValue : public EBValue {
   template <typename T>
   static auto wrapOrFail(const impl::StatePtr &state, T &&v);
 
+  template <typename T>
+  static auto wrap(const impl::StatePtr &state, T &&v) {
+    auto ret = wrapOrFail<T>(state, std::forward<T>(v));
+    if (failed(ret)) {
+      llvm_unreachable("Bad wrap");
+    }
+    return *ret;
+  }
+
 protected:
   using EBValue::EBValue;
 };
@@ -198,12 +207,12 @@ struct OperatorHandlers {
 
   template <typename OP, typename V, typename T2>
   static V handleBinaryConst(const V &a, const T2 &b) {
-    return handleBinary<OP>(a, EasyBuilder{a.builder}(b));
+    return handleBinary<OP>(a, EBArithValue::wrap(a.builder, b));
   }
 
   template <typename OP, typename V, typename T2>
   static V handleBinaryConst(const T2 &a, const V &b) {
-    return handleBinary<OP>(EasyBuilder{b.builder}(a), b);
+    return handleBinary<OP>(EBArithValue::wrap(b.builder, a), b);
   }
 
   template <typename OP, typename V, typename Pred>
@@ -215,17 +224,18 @@ struct OperatorHandlers {
 
   template <typename OP, typename V, typename T2, typename Pred>
   static EBUnsigned handleCmpConst(const V &a, const T2 &b, Pred predicate) {
-    return handleCmp<OP>(a, EasyBuilder{a.builder}(b), predicate);
+    return handleCmp<OP>(a, EBArithValue::wrap(a.builder, b), predicate);
   }
 
   template <typename OP, typename V, typename T2, typename Pred>
   static EBUnsigned handleCmpConst(const T2 &a, const V &b, Pred predicate) {
-    return handleCmp<OP>(EasyBuilder{b.builder}(a), b, predicate);
+    return handleCmp<OP>(EBArithValue::wrap(b.builder, a), b, predicate);
   }
 
-  static EBFloatPoint handleNeg(const EBFloatPoint &a) {
-    return {a.builder, a.builder->builder.template create<arith::NegFOp>(
-                           a.builder->loc, a.v)};
+  template <typename T, typename TOp, typename... Args>
+  static T create(const impl::StatePtr &state, Args &&...v) {
+    return {state,
+            state->builder.create<TOp>(state->loc, std::forward<Args>(v)...)};
   }
 };
 
@@ -268,7 +278,7 @@ DEF_EASYBUILD_BINARY_OPERATOR_FOR_INT(^, arith::XOrIOp, arith::XOrIOp)
 #undef DEF_EASYBUILD_BINARY_OPERATOR_FOR_TYPE
 
 inline EBFloatPoint operator-(const EBFloatPoint &a) {
-  return OperatorHandlers::handleNeg(a);
+  return OperatorHandlers::create<EBFloatPoint, arith::NegFOp>(a.builder, a.v);
 }
 
 #define DEF_EASYBUILD_CMP_OPERATOR(OP, OPCLASS, TYPE, PRED)                    \
@@ -324,6 +334,119 @@ DEF_EASYBUILD_CMP_OPERATOR(!=, arith::CmpFOp, EBFloatPoint,
                            arith::CmpFPredicate::ONE)
 
 #undef DEF_EASYBUILD_CMP_OPERATOR
+
+namespace arithops {
+inline EBFloatPoint castIntToFP(Type type, const EBSigned &v) {
+  return OperatorHandlers::create<EBFloatPoint, arith::SIToFPOp>(v.builder,
+                                                                 type, v);
+}
+
+inline EBFloatPoint castIntToFP(Type type, const EBUnsigned &v) {
+  return OperatorHandlers::create<EBFloatPoint, arith::UIToFPOp>(v.builder,
+                                                                 type, v);
+}
+
+template <typename T>
+inline T castFPToInt(const EBFloatPoint &v) {
+  if constexpr (std::is_same_v<T, EBSigned>) {
+    return OperatorHandlers::create<EBSigned, arith::FPToSIOp>(v.builder, v);
+  } else {
+    static_assert(std::is_same_v<T, EBUnsigned>,
+                  "Expecting EBUnsigned or EBSigned");
+    return OperatorHandlers::create<EBUnsigned, arith::FPToUIOp>(v.builder, v);
+  }
+}
+
+inline EBSigned ceildiv(const EBSigned &a, const EBSigned &b) {
+  return OperatorHandlers::create<EBSigned, arith::CeilDivSIOp>(a.builder, a,
+                                                                b);
+}
+
+inline EBUnsigned ceildiv(const EBUnsigned &a, const EBUnsigned &b) {
+  return OperatorHandlers::create<EBUnsigned, arith::CeilDivUIOp>(a.builder, a,
+                                                                  b);
+}
+
+inline EBSigned floordiv(const EBSigned &a, const EBSigned &b) {
+  return OperatorHandlers::create<EBSigned, arith::FloorDivSIOp>(a.builder, a,
+                                                                 b);
+}
+
+inline EBSigned extend(Type type, const EBSigned &a) {
+  return OperatorHandlers::create<EBSigned, arith::ExtSIOp>(a.builder, type, a);
+}
+
+inline EBUnsigned extend(Type type, const EBUnsigned &a) {
+  return OperatorHandlers::create<EBUnsigned, arith::ExtUIOp>(a.builder, type,
+                                                              a);
+}
+
+inline EBFloatPoint extend(Type type, const EBFloatPoint &a) {
+  return OperatorHandlers::create<EBFloatPoint, arith::ExtFOp>(a.builder, type,
+                                                               a);
+}
+
+inline EBSigned trunc(Type type, const EBSigned &a) {
+  return OperatorHandlers::create<EBSigned, arith::TruncIOp>(a.builder, type,
+                                                             a);
+}
+
+inline EBFloatPoint trunc(Type type, const EBFloatPoint &a) {
+  return OperatorHandlers::create<EBFloatPoint, arith::TruncFOp>(a.builder,
+                                                                 type, a);
+}
+
+template <typename T>
+inline T select(const EBUnsigned &pred, const T &trueValue,
+                const T &falseValue) {
+  static_assert(std::is_base_of_v<EBArithValue, T>,
+                "Expecting T to be a subclass of EBArithValue");
+  return OperatorHandlers::create<T, arith::SelectOp>(pred.builder, pred,
+                                                      trueValue, falseValue);
+}
+
+template <typename TyTo, typename TyFrom>
+inline TyTo bitcast(Type type, const TyFrom &v) {
+  return OperatorHandlers::create<TyTo, arith::BitcastOp>(v.builder, type, v);
+}
+
+inline EBSigned min(const EBSigned &a, const EBSigned &b) {
+  return OperatorHandlers::create<EBSigned, arith::MinSIOp>(a.builder, a, b);
+}
+
+inline EBSigned max(const EBSigned &a, const EBSigned &b) {
+  return OperatorHandlers::create<EBSigned, arith::MaxSIOp>(a.builder, a, b);
+}
+
+inline EBUnsigned min(const EBUnsigned &a, const EBUnsigned &b) {
+  return OperatorHandlers::create<EBUnsigned, arith::MinUIOp>(a.builder, a, b);
+}
+
+inline EBUnsigned max(const EBUnsigned &a, const EBUnsigned &b) {
+  return OperatorHandlers::create<EBUnsigned, arith::MaxUIOp>(a.builder, a, b);
+}
+
+inline EBFloatPoint minnum(const EBFloatPoint &a, const EBFloatPoint &b) {
+  return OperatorHandlers::create<EBFloatPoint, arith::MinNumFOp>(a.builder, a,
+                                                                  b);
+}
+
+inline EBFloatPoint maxnum(const EBFloatPoint &a, const EBFloatPoint &b) {
+  return OperatorHandlers::create<EBFloatPoint, arith::MaxNumFOp>(a.builder, a,
+                                                                  b);
+}
+
+inline EBFloatPoint minimum(const EBFloatPoint &a, const EBFloatPoint &b) {
+  return OperatorHandlers::create<EBFloatPoint, arith::MinimumFOp>(a.builder, a,
+                                                                   b);
+}
+
+inline EBFloatPoint maximum(const EBFloatPoint &a, const EBFloatPoint &b) {
+  return OperatorHandlers::create<EBFloatPoint, arith::MaximumFOp>(a.builder, a,
+                                                                   b);
+}
+
+} // namespace arithops
 
 } // namespace easybuild
 } // namespace mlir
