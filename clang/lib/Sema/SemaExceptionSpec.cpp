@@ -258,13 +258,14 @@ Sema::UpdateExceptionSpec(FunctionDecl *FD,
 }
 
 static bool exceptionSpecNotKnownYet(const FunctionDecl *FD) {
-  auto *MD = dyn_cast<CXXMethodDecl>(FD);
-  if (!MD)
+  ExceptionSpecificationType EST =
+      FD->getType()->castAs<FunctionProtoType>()->getExceptionSpecType();
+  if (EST == EST_Unparsed)
+    return true;
+  else if (EST != EST_Unevaluated)
     return false;
-
-  auto EST = MD->getType()->castAs<FunctionProtoType>()->getExceptionSpecType();
-  return EST == EST_Unparsed ||
-         (EST == EST_Unevaluated && MD->getParent()->isBeingDefined());
+  const DeclContext *DC = FD->getLexicalDeclContext();
+  return DC->isRecord() && cast<RecordDecl>(DC)->isBeingDefined();
 }
 
 static bool CheckEquivalentExceptionSpecImpl(
@@ -1413,6 +1414,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Expr::PackIndexingExprClass:
   case Expr::StringLiteralClass:
   case Expr::SourceLocExprClass:
+  case Expr::EmbedExprClass:
   case Expr::ConceptSpecializationExprClass:
   case Expr::RequiresExprClass:
     // These expressions can never throw.
@@ -1424,6 +1426,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
 
     // Most statements can throw if any substatement can throw.
   case Stmt::OpenACCComputeConstructClass:
+  case Stmt::OpenACCLoopConstructClass:
   case Stmt::AttributedStmtClass:
   case Stmt::BreakStmtClass:
   case Stmt::CapturedStmtClass:

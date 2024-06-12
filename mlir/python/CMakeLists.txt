@@ -21,6 +21,7 @@ declare_mlir_python_sources(MLIRPythonSources.Core.Python
     _mlir_libs/__init__.py
     ir.py
     passmanager.py
+    rewrite.py
     dialects/_ods_common.py
 
     # The main _mlir module has submodules: include stubs from each.
@@ -448,6 +449,7 @@ declare_mlir_python_extension(MLIRPythonExtension.Core
     IRModule.cpp
     IRTypes.cpp
     Pass.cpp
+    Rewrite.cpp
 
     # Headers must be included explicitly so they are installed.
     Globals.h
@@ -538,7 +540,7 @@ declare_mlir_python_extension(MLIRPythonExtension.Dialects.Quant.Pybind
 )
 
 declare_mlir_python_extension(MLIRPythonExtension.Dialects.NVGPU.Pybind
-  MODULE_NAME _mlirDialectsNvgpu
+  MODULE_NAME _mlirDialectsNVGPU
   ADD_TO_PARENT MLIRPythonSources.Dialects.nvgpu
   ROOT_DIR "${PYTHON_SOURCE_DIR}"
   SOURCES

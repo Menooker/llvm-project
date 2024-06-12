@@ -28,6 +28,7 @@
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Ownership.h"
 #include "clang/Sema/SemaInternal.h"
+#include "clang/Sema/SemaObjC.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/PointerIntPair.h"
@@ -312,6 +313,8 @@ class InitListChecker {
   InitListExpr *FullyStructuredList = nullptr;
   NoInitExpr *DummyExpr = nullptr;
   SmallVectorImpl<QualType> *AggrDeductionCandidateParamTypes = nullptr;
+  EmbedExpr *CurEmbed = nullptr; // Save current embed we're processing.
+  unsigned CurEmbedIndex = 0;
 
   NoInitExpr *getDummyInit() {
     if (!DummyExpr)
@@ -499,6 +502,42 @@ class InitListChecker {
                               bool TopLevelObject);
   void CheckEmptyInitializable(const InitializedEntity &Entity,
                                SourceLocation Loc);
+
+  Expr *HandleEmbed(EmbedExpr *Embed, const InitializedEntity &Entity) {
+    Expr *Result = nullptr;
+    // Undrestand which part of embed we'd like to reference.
+    if (!CurEmbed) {
+      CurEmbed = Embed;
+      CurEmbedIndex = 0;
+    }
+    // Reference just one if we're initializing a single scalar.
+    uint64_t ElsCount = 1;
+    // Otherwise try to fill whole array with embed data.
+    if (Entity.getKind() == InitializedEntity::EK_ArrayElement) {
+      ValueDecl *ArrDecl = Entity.getParent()->getDecl();
+      auto *AType = SemaRef.Context.getAsArrayType(ArrDecl->getType());
+      assert(AType && "expected array type when initializing array");
+      ElsCount = Embed->getDataElementCount();
+      if (const auto *CAType = dyn_cast<ConstantArrayType>(AType))
+        ElsCount = std::min(CAType->getSize().getZExtValue(),
+                            ElsCount - CurEmbedIndex);
+      if (ElsCount == Embed->getDataElementCount()) {
+        CurEmbed = nullptr;
+        CurEmbedIndex = 0;
+        return Embed;
+      }
+    }
+
+    Result = new (SemaRef.Context)
+        EmbedExpr(SemaRef.Context, Embed->getLocation(), Embed->getData(),
+                  CurEmbedIndex, ElsCount);
+    CurEmbedIndex += ElsCount;
+    if (CurEmbedIndex >= Embed->getDataElementCount()) {
+      CurEmbed = nullptr;
+      CurEmbedIndex = 0;
+    }
+    return Result;
+  }
 
 public:
   InitListChecker(
@@ -813,19 +852,13 @@ InitListChecker::FillInEmptyInitializations(const InitializedEntity &Entity,
 
   if (const RecordType *RType = ILE->getType()->getAs<RecordType>()) {
     const RecordDecl *RDecl = RType->getDecl();
-    if (RDecl->isUnion() && ILE->getInitializedFieldInUnion())
-      FillInEmptyInitForField(0, ILE->getInitializedFieldInUnion(),
-                              Entity, ILE, RequiresSecondPass, FillWithNoInit);
-    else if (RDecl->isUnion() && isa<CXXRecordDecl>(RDecl) &&
-             cast<CXXRecordDecl>(RDecl)->hasInClassInitializer()) {
-      for (auto *Field : RDecl->fields()) {
-        if (Field->hasInClassInitializer()) {
-          FillInEmptyInitForField(0, Field, Entity, ILE, RequiresSecondPass,
-                                  FillWithNoInit);
-          break;
-        }
-      }
+    if (RDecl->isUnion() && ILE->getInitializedFieldInUnion()) {
+      FillInEmptyInitForField(0, ILE->getInitializedFieldInUnion(), Entity, ILE,
+                              RequiresSecondPass, FillWithNoInit);
     } else {
+      assert((!RDecl->isUnion() || !isa<CXXRecordDecl>(RDecl) ||
+              !cast<CXXRecordDecl>(RDecl)->hasInClassInitializer()) &&
+             "We should have computed initialized fields already");
       // The fields beyond ILE->getNumInits() are default initialized, so in
       // order to leave them uninitialized, the ILE is expanded and the extra
       // fields are then filled with NoInitExpr.
@@ -875,7 +908,7 @@ InitListChecker::FillInEmptyInitializations(const InitializedEntity &Entity,
 
   InitializedEntity ElementEntity = Entity;
   unsigned NumInits = ILE->getNumInits();
-  unsigned NumElements = NumInits;
+  uint64_t NumElements = NumInits;
   if (const ArrayType *AType = SemaRef.Context.getAsArrayType(ILE->getType())) {
     ElementType = AType->getElementType();
     if (const auto *CAType = dyn_cast<ConstantArrayType>(AType))
@@ -895,7 +928,7 @@ InitListChecker::FillInEmptyInitializations(const InitializedEntity &Entity,
     ElementType = ILE->getType();
 
   bool SkipEmptyInitChecks = false;
-  for (unsigned Init = 0; Init != NumElements; ++Init) {
+  for (uint64_t Init = 0; Init != NumElements; ++Init) {
     if (hadError)
       return;
 
@@ -1464,6 +1497,9 @@ void InitListChecker::CheckSubElementType(const InitializedEntity &Entity,
       // Brace elision is never performed if the element is not an
       // assignment-expression.
       if (Seq || isa<InitListExpr>(expr)) {
+        if (auto *Embed = dyn_cast<EmbedExpr>(expr)) {
+          expr = HandleEmbed(Embed, Entity);
+        }
         if (!VerifyOnly) {
           ExprResult Result = Seq.Perform(SemaRef, TmpEntity, Kind, expr);
           if (Result.isInvalid())
@@ -1477,7 +1513,8 @@ void InitListChecker::CheckSubElementType(const InitializedEntity &Entity,
           UpdateStructuredListElement(StructuredList, StructuredIndex,
                                       getDummyInit());
         }
-        ++Index;
+        if (!CurEmbed)
+          ++Index;
         if (AggrDeductionCandidateParamTypes)
           AggrDeductionCandidateParamTypes->push_back(ElemType);
         return;
@@ -1670,6 +1707,8 @@ void InitListChecker::CheckScalarType(const InitializedEntity &Entity,
     ++Index;
     ++StructuredIndex;
     return;
+  } else if (auto *Embed = dyn_cast<EmbedExpr>(expr)) {
+    expr = HandleEmbed(Embed, Entity);
   }
 
   ExprResult Result;
@@ -1691,14 +1730,16 @@ void InitListChecker::CheckScalarType(const InitializedEntity &Entity,
   else {
     ResultExpr = Result.getAs<Expr>();
 
-    if (ResultExpr != expr && !VerifyOnly) {
+    if (ResultExpr != expr && !VerifyOnly && !CurEmbed) {
       // The type was promoted, update initializer list.
       // FIXME: Why are we updating the syntactic init list?
       IList->setInit(Index, ResultExpr);
     }
   }
+
   UpdateStructuredListElement(StructuredList, StructuredIndex, ResultExpr);
-  ++Index;
+  if (!CurEmbed)
+    ++Index;
   if (AggrDeductionCandidateParamTypes)
     AggrDeductionCandidateParamTypes->push_back(DeclType);
 }
@@ -1937,6 +1978,30 @@ static bool checkDestructorReference(QualType ElementType, SourceLocation Loc,
   return SemaRef.DiagnoseUseOfDecl(Destructor, Loc);
 }
 
+static bool canInitializeArrayWithEmbedDataString(ArrayRef<Expr *> ExprList,
+                                                  QualType InitType,
+                                                  ASTContext &Context) {
+  // Only one initializer, it's an embed and the types match;
+  EmbedExpr *EE =
+      ExprList.size() == 1
+          ? dyn_cast_if_present<EmbedExpr>(ExprList[0]->IgnoreParens())
+          : nullptr;
+  if (!EE)
+    return false;
+
+  if (InitType->isArrayType()) {
+    const ArrayType *InitArrayType = InitType->getAsArrayTypeUnsafe();
+    QualType InitElementTy = InitArrayType->getElementType();
+    QualType EmbedExprElementTy = EE->getType();
+    const bool TypesMatch =
+        Context.typesAreCompatible(InitElementTy, EmbedExprElementTy) ||
+        (InitElementTy->isCharType() && EmbedExprElementTy->isCharType());
+    if (TypesMatch)
+      return true;
+  }
+  return false;
+}
+
 void InitListChecker::CheckArrayType(const InitializedEntity &Entity,
                                      InitListExpr *IList, QualType &DeclType,
                                      llvm::APSInt elementIndex,
@@ -1952,6 +2017,12 @@ void InitListChecker::CheckArrayType(const InitializedEntity &Entity,
       hadError = true;
       return;
     }
+  }
+
+  if (canInitializeArrayWithEmbedDataString(IList->inits(), DeclType,
+                                            SemaRef.Context)) {
+    EmbedExpr *Embed = cast<EmbedExpr>(IList->inits()[0]);
+    IList->setInit(0, Embed->getDataStringLiteral());
   }
 
   // Check for the special-case of initializing an array with a string.
@@ -2056,13 +2127,24 @@ void InitListChecker::CheckArrayType(const InitializedEntity &Entity,
     if (maxElementsKnown && elementIndex == maxElements)
       break;
 
-    InitializedEntity ElementEntity =
-      InitializedEntity::InitializeElement(SemaRef.Context, StructuredIndex,
-                                           Entity);
+    InitializedEntity ElementEntity = InitializedEntity::InitializeElement(
+        SemaRef.Context, StructuredIndex, Entity);
+
+    unsigned EmbedElementIndexBeforeInit = CurEmbedIndex;
     // Check this element.
     CheckSubElementType(ElementEntity, IList, elementType, Index,
                         StructuredList, StructuredIndex);
     ++elementIndex;
+    if ((CurEmbed || isa<EmbedExpr>(Init)) && elementType->isScalarType()) {
+      if (CurEmbed) {
+        elementIndex =
+            elementIndex + CurEmbedIndex - EmbedElementIndexBeforeInit - 1;
+      } else {
+        auto Embed = cast<EmbedExpr>(Init);
+        elementIndex = elementIndex + Embed->getDataElementCount() -
+                       EmbedElementIndexBeforeInit - 1;
+      }
+    }
 
     // If the array is of incomplete type, keep track of the number of
     // elements in the initializer.
@@ -2163,12 +2245,15 @@ void InitListChecker::CheckStructUnionTypes(
         return;
       for (RecordDecl::field_iterator FieldEnd = RD->field_end();
            Field != FieldEnd; ++Field) {
-        if (Field->hasInClassInitializer()) {
+        if (Field->hasInClassInitializer() ||
+            (Field->isAnonymousStructOrUnion() &&
+             Field->getType()->getAsCXXRecordDecl()->hasInClassInitializer())) {
           StructuredList->setInitializedFieldInUnion(*Field);
           // FIXME: Actually build a CXXDefaultInitExpr?
           return;
         }
       }
+      llvm_unreachable("Couldn't find in-class initializer");
     }
 
     // Value-initialize the first member of the union that isn't an unnamed
@@ -2196,7 +2281,7 @@ void InitListChecker::CheckStructUnionTypes(
 
     // Designated inits always initialize fields, so if we see one, all
     // remaining base classes have no explicit initializer.
-    if (Init && isa<DesignatedInitExpr>(Init))
+    if (isa_and_nonnull<DesignatedInitExpr>(Init))
       Init = nullptr;
 
     // C++ [over.match.class.deduct]p1.6:
@@ -6018,8 +6103,8 @@ static bool tryObjCWritebackConversion(Sema &S,
 
   // Handle write-back conversion.
   QualType ConvertedArgType;
-  if (!S.isObjCWritebackConversion(ArgType, Entity.getType(),
-                                   ConvertedArgType))
+  if (!S.ObjC().isObjCWritebackConversion(ArgType, Entity.getType(),
+                                          ConvertedArgType))
     return false;
 
   // We should copy unless we're passing to an argument explicitly
@@ -6211,10 +6296,10 @@ void InitializationSequence::InitializeFrom(Sema &S,
   if (Args.size() == 1) {
     Initializer = Args[0];
     if (S.getLangOpts().ObjC) {
-      if (S.CheckObjCBridgeRelatedConversions(Initializer->getBeginLoc(),
-                                              DestType, Initializer->getType(),
-                                              Initializer) ||
-          S.CheckConversionToObjCLiteral(DestType, Initializer))
+      if (S.ObjC().CheckObjCBridgeRelatedConversions(
+              Initializer->getBeginLoc(), DestType, Initializer->getType(),
+              Initializer) ||
+          S.ObjC().CheckConversionToObjCLiteral(DestType, Initializer))
         Args[0] = Initializer;
     }
     if (!isa<InitListExpr>(Initializer))
@@ -6352,7 +6437,7 @@ void InitializationSequence::InitializeFrom(Sema &S,
     // class member of array type from a parenthesized initializer list.
     else if (S.getLangOpts().CPlusPlus &&
              Entity.getKind() == InitializedEntity::EK_Member &&
-             Initializer && isa<InitListExpr>(Initializer)) {
+             isa_and_nonnull<InitListExpr>(Initializer)) {
       TryListInitialization(S, Entity, Kind, cast<InitListExpr>(Initializer),
                             *this, TreatUnavailableAsInvalid);
       AddParenthesizedArrayInitStep(DestType);
@@ -6576,12 +6661,12 @@ void InitializationSequence::InitializeFrom(Sema &S,
 
     AddPassByIndirectCopyRestoreStep(DestType, ShouldCopy);
   } else if (ICS.isBad()) {
-    DeclAccessPair dap;
-    if (isLibstdcxxPointerReturnFalseHack(S, Entity, Initializer)) {
+    if (isLibstdcxxPointerReturnFalseHack(S, Entity, Initializer))
       AddZeroInitializationStep(Entity.getType());
-    } else if (Initializer->getType() == Context.OverloadTy &&
-               !S.ResolveAddressOfOverloadedFunction(Initializer, DestType,
-                                                     false, dap))
+    else if (DeclAccessPair Found;
+             Initializer->getType() == Context.OverloadTy &&
+             !S.ResolveAddressOfOverloadedFunction(Initializer, DestType,
+                                                   /*Complain=*/false, Found))
       SetFailed(InitializationSequence::FK_AddressOfOverloadFailed);
     else if (Initializer->getType()->isFunctionType() &&
              isExprAnUnaddressableFunction(S, Initializer))
@@ -8340,8 +8425,17 @@ void Sema::checkInitializerLifetime(const InitializedEntity &Entity,
             << Entity.getType()->isReferenceType() << CLE->getInitializer() << 2
             << DiagRange;
       } else {
-        Diag(DiagLoc, diag::warn_ret_local_temp_addr_ref)
-         << Entity.getType()->isReferenceType() << DiagRange;
+        // P2748R5: Disallow Binding a Returned Glvalue to a Temporary.
+        // [stmt.return]/p6: In a function whose return type is a reference,
+        // other than an invented function for std::is_convertible ([meta.rel]),
+        // a return statement that binds the returned reference to a temporary
+        // expression ([class.temporary]) is ill-formed.
+        if (getLangOpts().CPlusPlus26 && Entity.getType()->isReferenceType())
+          Diag(DiagLoc, diag::err_ret_local_temp_ref)
+              << Entity.getType()->isReferenceType() << DiagRange;
+        else
+          Diag(DiagLoc, diag::warn_ret_local_temp_addr_ref)
+              << Entity.getType()->isReferenceType() << DiagRange;
       }
       break;
     }
@@ -8786,7 +8880,7 @@ ExprResult InitializationSequence::Perform(Sema &S,
   // constant expressions here in order to perform narrowing checks =(
   EnterExpressionEvaluationContext Evaluated(
       S, EnterExpressionEvaluationContext::InitList,
-      CurInit.get() && isa<InitListExpr>(CurInit.get()));
+      isa_and_nonnull<InitListExpr>(CurInit.get()));
 
   // C++ [class.abstract]p2:
   //   no objects of an abstract class can be created except as subobjects
@@ -9056,19 +9150,18 @@ ExprResult InitializationSequence::Perform(Sema &S,
           }
         }
       }
-
+      Expr *Init = CurInit.get();
       CheckedConversionKind CCK =
           Kind.isCStyleCast()       ? CheckedConversionKind::CStyleCast
           : Kind.isFunctionalCast() ? CheckedConversionKind::FunctionalCast
           : Kind.isExplicitCast()   ? CheckedConversionKind::OtherCast
                                     : CheckedConversionKind::Implicit;
-      ExprResult CurInitExprRes =
-        S.PerformImplicitConversion(CurInit.get(), Step->Type, *Step->ICS,
-                                    getAssignmentAction(Entity), CCK);
+      ExprResult CurInitExprRes = S.PerformImplicitConversion(
+          Init, Step->Type, *Step->ICS, getAssignmentAction(Entity), CCK);
       if (CurInitExprRes.isInvalid())
         return ExprError();
 
-      S.DiscardMisalignedMemberAddress(Step->Type.getTypePtr(), CurInit.get());
+      S.DiscardMisalignedMemberAddress(Step->Type.getTypePtr(), Init);
 
       CurInit = CurInitExprRes;
 
@@ -9223,10 +9316,11 @@ ExprResult InitializationSequence::Perform(Sema &S,
 
     case SK_CAssignment: {
       QualType SourceType = CurInit.get()->getType();
+      Expr *Init = CurInit.get();
 
       // Save off the initial CurInit in case we need to emit a diagnostic
-      ExprResult InitialCurInit = CurInit;
-      ExprResult Result = CurInit;
+      ExprResult InitialCurInit = Init;
+      ExprResult Result = Init;
       Sema::AssignConvertType ConvTy =
         S.CheckSingleAssignmentConstraints(Step->Type, Result, true,
             Entity.getKind() == InitializedEntity::EK_Parameter_CF_Audited);
@@ -9566,12 +9660,12 @@ static void emitBadConversionNotes(Sema &S, const InitializedEntity &entity,
 
     // Emit a possible note about the conversion failing because the
     // operand is a message send with a related result type.
-    S.EmitRelatedResultTypeNote(op);
+    S.ObjC().EmitRelatedResultTypeNote(op);
 
     // Emit a possible note about a return failing because we're
     // expecting a related result type.
     if (entity.getKind() == InitializedEntity::EK_Result)
-      S.EmitRelatedResultTypeNoteForReturn(destType);
+      S.ObjC().EmitRelatedResultTypeNoteForReturn(destType);
   }
   QualType fromType = op->getType();
   QualType fromPointeeType = fromType.getCanonicalType()->getPointeeType();
@@ -9632,6 +9726,8 @@ bool InitializationSequence::Diagnose(Sema &S,
   if (!Failed())
     return false;
 
+  QualType DestType = Entity.getType();
+
   // When we want to diagnose only one element of a braced-init-list,
   // we need to factor it out.
   Expr *OnlyArg;
@@ -9641,11 +9737,21 @@ bool InitializationSequence::Diagnose(Sema &S,
       OnlyArg = List->getInit(0);
     else
       OnlyArg = Args[0];
+
+    if (OnlyArg->getType() == S.Context.OverloadTy) {
+      DeclAccessPair Found;
+      if (FunctionDecl *FD = S.ResolveAddressOfOverloadedFunction(
+              OnlyArg, DestType.getNonReferenceType(), /*Complain=*/false,
+              Found)) {
+        if (Expr *Resolved =
+                S.FixOverloadedFunctionReference(OnlyArg, Found, FD).get())
+          OnlyArg = Resolved;
+      }
+    }
   }
   else
     OnlyArg = nullptr;
 
-  QualType DestType = Entity.getType();
   switch (Failure) {
   case FK_TooManyInitsForReference:
     // FIXME: Customize for the initialized entity?
@@ -10789,8 +10895,6 @@ QualType Sema::DeduceTemplateSpecializationFromInitializer(
 
   // FIXME: Perform "exact type" matching first, per CWG discussion?
   //        Or implement this via an implied 'T(T) -> T' deduction guide?
-
-  // FIXME: Do we need/want a std::initializer_list<T> special case?
 
   // Look up deduction guides, including those synthesized from constructors.
   //
