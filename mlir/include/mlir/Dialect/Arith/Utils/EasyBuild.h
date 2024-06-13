@@ -41,8 +41,8 @@ struct ToFloatType<8> {
 
 inline Type getElementType(Value v) {
   auto type = v.getType();
-  if (type.isa<TensorType>() || type.isa<VectorType>()) {
-    type = type.cast<ShapedType>().getElementType();
+  if (isa<TensorType, VectorType>(type)) {
+    type = cast<ShapedType>(type).getElementType();
   }
   return type;
 }
@@ -87,7 +87,7 @@ struct EBUnsigned : public EBArithValue {
       return wrapOrFail(state, v.get<Value>());
     }
     auto attr = v.get<Attribute>();
-    if (auto val = attr.dyn_cast<IntegerAttr>()) {
+    if (auto val = dyn_cast<IntegerAttr>(attr)) {
       if (val.getType().isIndex())
         return EBUnsigned{state, state->builder.create<arith::ConstantIndexOp>(
                                      state->loc, val.getInt())};
@@ -118,7 +118,7 @@ struct EBSigned : EBArithValue {
       return wrapOrFail(state, v.get<Value>());
     }
     auto attr = v.get<Attribute>();
-    if (auto val = attr.dyn_cast<IntegerAttr>())
+    if (auto val = dyn_cast<IntegerAttr>(attr))
       return EBSigned{state, state->builder.create<arith::ConstantIntOp>(
                                  state->loc, val.getInt(), val.getType())};
     return failure();
@@ -134,7 +134,7 @@ struct EBFloatPoint : EBArithValue {
   static FailureOr<EBFloatPoint> wrapOrFail(const impl::StatePtr &state,
                                             Value v) {
     auto type = impl::getElementType(v);
-    if (type.isa<FloatType>()) {
+    if (isa<FloatType>(type)) {
       return EBFloatPoint{state, v};
     }
     return failure();
@@ -145,10 +145,10 @@ struct EBFloatPoint : EBArithValue {
       return wrapOrFail(state, v.get<Value>());
     }
     auto attr = v.get<Attribute>();
-    if (auto val = attr.dyn_cast<FloatAttr>())
+    if (auto val = dyn_cast<FloatAttr>(attr))
       return EBFloatPoint{state, state->builder.create<arith::ConstantFloatOp>(
                                      state->loc, val.getValue(),
-                                     val.getType().cast<FloatType>())};
+                                     cast<FloatType>(val.getType()))};
     return failure();
   }
   friend struct EBArithValue;

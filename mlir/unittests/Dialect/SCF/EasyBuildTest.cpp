@@ -6,10 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "gc/Dialect/Arith/Utils/EasyBuild.h"
-#include "gc/IR/EasyBuildSCF.h"
+#include "mlir/Dialect/Arith/Utils/EasyBuild.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/EasyBuildSCF.h"
 #include "gtest/gtest.h"
 
 using namespace mlir;
