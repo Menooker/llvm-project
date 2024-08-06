@@ -1,8 +1,11 @@
 add_mlir_unittest(MLIRSCFTests
   LoopLikeSCFOpsTest.cpp
+  EasyBuildTest.cpp
 )
 target_link_libraries(MLIRSCFTests
   PRIVATE
   MLIRIR
   MLIRSCFDialect
+  MLIRFuncDialect
+  MLIRArithDialect
 )
