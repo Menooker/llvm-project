@@ -10,58 +10,6 @@ func.func @unknown_clause() {
 
 // -----
 
-func.func @not_wrapper() {
-  // expected-error@+1 {{op must be a loop wrapper}}
-  omp.distribute {
-    omp.parallel {
-      %0 = arith.constant 0 : i32
-      omp.terminator
-    }
-    omp.terminator
-  }
-
-  return
-}
-
-// -----
-
-func.func @invalid_nested_wrapper(%lb : index, %ub : index, %step : index) {
-  omp.distribute {
-    // expected-error@+1 {{only supported nested wrapper is 'omp.wsloop'}}
-    omp.parallel {
-      omp.simd {
-        omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
-          omp.yield
-        }
-        omp.terminator
-      }
-      omp.terminator
-    }
-    omp.terminator
-  }
-
-  return
-}
-
-// -----
-
-func.func @no_nested_wrapper(%lb : index, %ub : index, %step : index) {
-  omp.distribute {
-    // expected-error@+1 {{op must not wrap an 'omp.loop_nest' directly}}
-    omp.parallel {
-      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
-        omp.yield
-      }
-      omp.terminator
-    }
-    omp.terminator
-  }
-
-  return
-}
-
-// -----
-
 func.func @if_once(%n : i1) {
   // expected-error@+1 {{`if` clause can appear at most once in the expansion of the oilist directive}}
   omp.parallel if(%n) if(%n) {
@@ -140,22 +88,9 @@ func.func @proc_bind_once() {
 // -----
 
 func.func @invalid_parent(%lb : index, %ub : index, %step : index) {
-  // expected-error@+1 {{op expects parent op to be a valid loop wrapper}}
+  // expected-error@+1 {{op expects parent op to be a loop wrapper}}
   omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
     omp.yield
-  }
-}
-
-// -----
-
-func.func @invalid_wrapper(%lb : index, %ub : index, %step : index) {
-  omp.parallel {
-    %0 = arith.constant 0 : i32
-    // expected-error@+1 {{op expects parent op to be a valid loop wrapper}}
-    omp.loop_nest (%iv2) : index = (%lb) to (%ub) step (%step) {
-      omp.yield
-    }
-    omp.terminator
   }
 }
 
@@ -188,7 +123,7 @@ func.func @iv_number_mismatch(%lb : index, %ub : index, %step : index) {
 // -----
 
 func.func @no_wrapper(%lb : index, %ub : index, %step : index) {
-  // expected-error @below {{op must be a loop wrapper}}
+  // expected-error @below {{op loop wrapper does not contain exactly two nested ops}}
   omp.wsloop {
     %0 = arith.constant 0 : i32
     omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
@@ -208,9 +143,9 @@ func.func @invalid_nested_wrapper(%lb : index, %ub : index, %step : index) {
         omp.yield
       }
       omp.terminator
-    }
+    } {omp.composite}
     omp.terminator
-  }
+  } {omp.composite}
 }
 
 // -----
@@ -374,7 +309,7 @@ llvm.func @test_omp_wsloop_dynamic_wrong_modifier3(%lb : i64, %ub : i64, %step :
 // -----
 
 func.func @omp_simd() -> () {
-  // expected-error @below {{op must be a loop wrapper}}
+  // expected-error @below {{op loop wrapper does not contain exactly two nested ops}}
   omp.simd {
     omp.terminator
   }
@@ -565,7 +500,63 @@ func.func @omp_simd_pretty_simdlen_safelen(%lb : index, %ub : index, %step : ind
 
 // -----
 
-// expected-error @below {{op expects initializer region with one argument of the reduction type}}
+// expected-error @below {{op expects alloc region to yield a value of the reduction type}}
+omp.declare_reduction @add_f32 : f32
+alloc {
+^bb0(%arg: f32):
+// nonsense test code
+  %0 = arith.constant 0.0 : f64
+  omp.yield (%0 : f64)
+}
+init {
+^bb0(%arg0: f32, %arg1: f32):
+  %0 = arith.constant 0.0 : f32
+  omp.yield (%0 : f32)
+}
+combiner {
+^bb1(%arg0: f32, %arg1: f32):
+  %1 = arith.addf %arg0, %arg1 : f32
+  omp.yield (%1 : f32)
+}
+
+// -----
+
+// expected-error @below {{op expects two arguments to the initializer region when an allocation region is used}}
+omp.declare_reduction @add_f32 : f32
+alloc {
+^bb0(%arg: f32):
+// nonsense test code
+  omp.yield (%arg : f32)
+}
+init {
+^bb0(%arg0: f32):
+  %0 = arith.constant 0.0 : f32
+  omp.yield (%0 : f32)
+}
+combiner {
+^bb1(%arg0: f32, %arg1: f32):
+  %1 = arith.addf %arg0, %arg1 : f32
+  omp.yield (%1 : f32)
+}
+
+// -----
+
+// expected-error @below {{op expects one argument to the initializer region when no allocation region is used}}
+omp.declare_reduction @add_f32 : f32
+init {
+^bb0(%arg: f32, %arg2: f32):
+  %0 = arith.constant 0.0 : f32
+  omp.yield (%0 : f32)
+}
+combiner {
+^bb1(%arg0: f32, %arg1: f32):
+  %1 = arith.addf %arg0, %arg1 : f32
+  omp.yield (%1 : f32)
+}
+
+// -----
+
+// expected-error @below {{op expects initializer region argument to match the reduction type}}
 omp.declare_reduction @add_f32 : f64
 init {
 ^bb0(%arg: f32):
@@ -679,6 +670,33 @@ combiner {
 cleanup {
 ^bb0(%arg: f64):
   omp.yield
+}
+
+// -----
+
+// expected-error @below {{op region #0 ('allocRegion') failed to verify constraint: region with at most 1 blocks}}
+omp.declare_reduction @alloc_reduction : !llvm.ptr
+alloc {
+^bb0(%arg: !llvm.ptr):
+  %c1 = arith.constant 1 : i32
+  %0 = llvm.alloca %c1 x f32 : (i32) -> !llvm.ptr
+  cf.br ^bb1(%0: !llvm.ptr)
+^bb1(%ret: !llvm.ptr):
+  omp.yield (%ret : !llvm.ptr)
+}
+init {
+^bb0(%arg: !llvm.ptr):
+  %cst = arith.constant 1.0 : f32
+  llvm.store %cst, %arg : f32, !llvm.ptr
+  omp.yield (%arg : !llvm.ptr)
+}
+combiner {
+^bb1(%arg0: !llvm.ptr, %arg1: !llvm.ptr):
+  %0 = llvm.load %arg0 : !llvm.ptr -> f32
+  %1 = llvm.load %arg1 : !llvm.ptr -> f32
+  %2 = arith.addf %0, %1 : f32
+  llvm.store %2, %arg0 : f32, !llvm.ptr
+  omp.yield (%arg0 : !llvm.ptr)
 }
 
 // -----
@@ -1394,7 +1412,7 @@ func.func @omp_teams_allocate(%data_var : memref<i32>) {
     // expected-error @below {{expected equal sizes for allocate and allocator variables}}
     "omp.teams" (%data_var) ({
       omp.terminator
-    }) {operandSegmentSizes = array<i32: 0,0,0,0,1,0,0,0>} : (memref<i32>) -> ()
+    }) {operandSegmentSizes = array<i32: 1,0,0,0,0,0,0,0>} : (memref<i32>) -> ()
     omp.terminator
   }
   return
@@ -1407,7 +1425,7 @@ func.func @omp_teams_num_teams1(%lb : i32) {
     // expected-error @below {{expected num_teams upper bound to be defined if the lower bound is defined}}
     "omp.teams" (%lb) ({
       omp.terminator
-    }) {operandSegmentSizes = array<i32: 1,0,0,0,0,0,0,0>} : (i32) -> ()
+    }) {operandSegmentSizes = array<i32: 0,0,0,1,0,0,0,0>} : (i32) -> ()
     omp.terminator
   }
   return
@@ -1432,7 +1450,7 @@ func.func @omp_sections(%data_var : memref<i32>) -> () {
   // expected-error @below {{expected equal sizes for allocate and allocator variables}}
   "omp.sections" (%data_var) ({
     omp.terminator
-  }) {operandSegmentSizes = array<i32: 0,1,0,0>} : (memref<i32>) -> ()
+  }) {operandSegmentSizes = array<i32: 1,0,0,0>} : (memref<i32>) -> ()
   return
 }
 
@@ -1442,7 +1460,7 @@ func.func @omp_sections(%data_var : memref<i32>) -> () {
   // expected-error @below {{expected as many reduction symbol references as reduction variables}}
   "omp.sections" (%data_var) ({
     omp.terminator
-  }) {operandSegmentSizes = array<i32: 1,0,0,0>} : (memref<i32>) -> ()
+  }) {operandSegmentSizes = array<i32: 0,0,0,1>} : (memref<i32>) -> ()
   return
 }
 
@@ -1623,7 +1641,7 @@ func.func @omp_task_depend(%data_var: memref<i32>) {
   // expected-error @below {{op expected as many depend values as depend variables}}
     "omp.task"(%data_var) ({
       "omp.terminator"() : () -> ()
-    }) {depend_kinds = [], operandSegmentSizes = array<i32: 0, 0, 0, 0, 1, 0, 0, 0>} : (memref<i32>) -> ()
+    }) {depend_kinds = [], operandSegmentSizes = array<i32: 0, 0, 1, 0, 0, 0, 0, 0>} : (memref<i32>) -> ()
    "func.return"() : () -> ()
 }
 
@@ -1820,7 +1838,7 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
     omp.loop_nest (%i, %j) : i32 = (%lb, %ub) to (%ub, %lb) step (%step, %step) {
       omp.yield
     }
-  }) {operandSegmentSizes = array<i32: 0, 0, 0, 0, 0, 1, 0, 0, 0, 0>} : (memref<i32>) -> ()
+  }) {operandSegmentSizes = array<i32: 1, 0, 0, 0, 0, 0, 0, 0, 0, 0>} : (memref<i32>) -> ()
   return
 }
 
@@ -1834,7 +1852,7 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
     omp.loop_nest (%i, %j) : i32 = (%lb, %ub) to (%ub, %lb) step (%step, %step) {
       omp.yield
     }
-  }) {operandSegmentSizes = array<i32: 0, 0, 0, 2, 0, 0, 0, 0, 0, 0>, reduction_syms = [@add_f32]} : (!llvm.ptr, !llvm.ptr) -> ()
+  }) {operandSegmentSizes = array<i32: 0, 0, 0, 0, 0, 0, 0, 0, 0, 2>, reduction_syms = [@add_f32]} : (!llvm.ptr, !llvm.ptr) -> ()
   return
 }
 
@@ -1847,7 +1865,7 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
     omp.loop_nest (%i, %j) : i32 = (%lb, %ub) to (%ub, %lb) step (%step, %step) {
       omp.yield
     }
-  }) {operandSegmentSizes = array<i32: 0, 0, 0, 1, 0, 0, 0, 0, 0, 0>, reduction_syms = [@add_f32, @add_f32]} : (!llvm.ptr) -> ()
+  }) {operandSegmentSizes = array<i32: 0, 0, 0, 0, 0, 0, 0, 0, 0, 1>, reduction_syms = [@add_f32, @add_f32]} : (!llvm.ptr) -> ()
   return
 }
 
@@ -1861,7 +1879,7 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
     omp.loop_nest (%i, %j) : i32 = (%lb, %ub) to (%ub, %lb) step (%step, %step) {
       omp.yield
     }
-  }) {in_reduction_syms = [@add_f32], operandSegmentSizes = array<i32: 0, 0, 2, 0, 0, 0, 0, 0, 0, 0>} : (!llvm.ptr, !llvm.ptr) -> ()
+  }) {in_reduction_syms = [@add_f32], operandSegmentSizes = array<i32: 0, 0, 0, 0, 0, 2, 0, 0, 0, 0>} : (!llvm.ptr, !llvm.ptr) -> ()
   return
 }
 
@@ -1874,7 +1892,7 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
     omp.loop_nest (%i, %j) : i32 = (%lb, %ub) to (%ub, %lb) step (%step, %step) {
       omp.yield
     }
-  }) {in_reduction_syms = [@add_f32, @add_f32], operandSegmentSizes = array<i32: 0, 0, 1, 0, 0, 0, 0, 0, 0, 0>} : (!llvm.ptr) -> ()
+  }) {in_reduction_syms = [@add_f32, @add_f32], operandSegmentSizes = array<i32: 0, 0, 0, 0, 0, 1, 0, 0, 0, 0>} : (!llvm.ptr) -> ()
   return
 }
 
@@ -1945,7 +1963,7 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
 // -----
 
 func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
-  // expected-error @below {{op must be a loop wrapper}}
+  // expected-error @below {{op first nested op in loop wrapper is not another loop wrapper or `omp.loop_nest`}}
   omp.taskloop {
     %0 = arith.constant 0 : i32
     omp.terminator
@@ -1963,9 +1981,9 @@ func.func @taskloop(%lb: i32, %ub: i32, %step: i32) {
         omp.yield
       }
       omp.terminator
-    }
+    } {omp.composite}
     omp.terminator
-  }
+  } {omp.composite}
   return
 }
 
@@ -2020,7 +2038,7 @@ func.func @omp_target_enter_data(%map1: memref<?xi32>) {
 func.func @omp_target_enter_data_depend(%a: memref<?xi32>) {
   %0 = omp.map.info var_ptr(%a: memref<?xi32>, tensor<?xi32>) map_clauses(to) capture(ByRef) -> memref<?xi32>
   // expected-error @below {{op expected as many depend values as depend variables}}
-  omp.target_enter_data map_entries(%0: memref<?xi32> ) {operandSegmentSizes = array<i32: 0, 0, 1, 0>}
+  omp.target_enter_data map_entries(%0: memref<?xi32> ) {operandSegmentSizes = array<i32: 1, 0, 0, 0>}
   return
 }
 
@@ -2038,7 +2056,7 @@ func.func @omp_target_exit_data(%map1: memref<?xi32>) {
 func.func @omp_target_exit_data_depend(%a: memref<?xi32>) {
   %0 = omp.map.info var_ptr(%a: memref<?xi32>, tensor<?xi32>) map_clauses(from) capture(ByRef) -> memref<?xi32>
   // expected-error @below {{op expected as many depend values as depend variables}}
-  omp.target_exit_data map_entries(%0: memref<?xi32> ) {operandSegmentSizes = array<i32: 0, 0, 1, 0>}
+  omp.target_exit_data map_entries(%0: memref<?xi32> ) {operandSegmentSizes = array<i32: 1, 0, 0, 0>}
   return
 }
 
@@ -2119,7 +2137,7 @@ llvm.mlir.global internal @_QFsubEx() : i32
 func.func @omp_target_update_data_depend(%a: memref<?xi32>) {
   %0 = omp.map.info var_ptr(%a: memref<?xi32>, tensor<?xi32>) map_clauses(to) capture(ByRef) -> memref<?xi32>
   // expected-error @below {{op expected as many depend values as depend variables}}
-  omp.target_update map_entries(%0: memref<?xi32> ) {operandSegmentSizes = array<i32: 0, 0, 1, 0>}
+  omp.target_update map_entries(%0: memref<?xi32> ) {operandSegmentSizes = array<i32: 1, 0, 0, 0>}
   return
 }
 
@@ -2129,7 +2147,7 @@ func.func @omp_target_depend(%data_var: memref<i32>) {
   // expected-error @below {{op expected as many depend values as depend variables}}
     "omp.target"(%data_var) ({
       "omp.terminator"() : () -> ()
-    }) {depend_kinds = [], operandSegmentSizes = array<i32: 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0>} : (memref<i32>) -> ()
+    }) {depend_kinds = [], operandSegmentSizes = array<i32: 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0>} : (memref<i32>) -> ()
    "func.return"() : () -> ()
 }
 
@@ -2137,7 +2155,7 @@ func.func @omp_target_depend(%data_var: memref<i32>) {
 
 func.func @omp_distribute_schedule(%chunk_size : i32) -> () {
   // expected-error @below {{op chunk size set without dist_schedule_static being present}}
-  "omp.distribute"(%chunk_size) <{operandSegmentSizes = array<i32: 1, 0, 0, 0>}> ({
+  "omp.distribute"(%chunk_size) <{operandSegmentSizes = array<i32: 0, 0, 1, 0>}> ({
       "omp.terminator"() : () -> ()
     }) : (i32) -> ()
 }
@@ -2146,32 +2164,64 @@ func.func @omp_distribute_schedule(%chunk_size : i32) -> () {
 
 func.func @omp_distribute_allocate(%data_var : memref<i32>) -> () {
   // expected-error @below {{expected equal sizes for allocate and allocator variables}}
-  "omp.distribute"(%data_var) <{operandSegmentSizes = array<i32: 0, 1, 0, 0>}> ({
+  "omp.distribute"(%data_var) <{operandSegmentSizes = array<i32: 1, 0, 0, 0>}> ({
       "omp.terminator"() : () -> ()
     }) : (memref<i32>) -> ()
 }
 
 // -----
 
-func.func @omp_distribute_wrapper() -> () {
-  // expected-error @below {{op must be a loop wrapper}}
+func.func @omp_distribute_wrapper(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{op second nested op in loop wrapper is not a terminator}}
   omp.distribute {
+      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+        "omp.yield"() : () -> ()
+      }
       %0 = arith.constant 0 : i32
-      "omp.terminator"() : () -> ()
   }
 }
 
 // -----
 
 func.func @omp_distribute_nested_wrapper(%lb: index, %ub: index, %step: index) -> () {
-  // expected-error @below {{only supported nested wrappers are 'omp.parallel' and 'omp.simd'}}
+  // expected-error @below {{an 'omp.wsloop' nested wrapper is only allowed when 'omp.parallel' is the direct parent}}
   omp.distribute {
     "omp.wsloop"() ({
       omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
         "omp.yield"() : () -> ()
       }
       "omp.terminator"() : () -> ()
-    }) : () -> ()
+    }) {omp.composite} : () -> ()
+    "omp.terminator"() : () -> ()
+  } {omp.composite}
+}
+
+// -----
+
+func.func @omp_distribute_nested_wrapper2(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{only supported nested wrappers are 'omp.simd' and 'omp.wsloop'}}
+  omp.distribute {
+    "omp.taskloop"() ({
+      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+        "omp.yield"() : () -> ()
+      }
+      "omp.terminator"() : () -> ()
+    }) {omp.composite} : () -> ()
+    "omp.terminator"() : () -> ()
+  } {omp.composite}
+}
+
+// -----
+
+func.func @omp_distribute_nested_wrapper3(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute missing from composite wrapper}}
+  omp.distribute {
+    "omp.simd"() ({
+      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+        "omp.yield"() : () -> ()
+      }
+      "omp.terminator"() : () -> ()
+    }) {omp.composite} : () -> ()
     "omp.terminator"() : () -> ()
   }
 }
@@ -2340,7 +2390,7 @@ func.func @undefined_privatizer(%arg0: index) {
 // -----
 func.func @undefined_privatizer(%arg0: !llvm.ptr) {
   // expected-error @below {{inconsistent number of private variables and privatizer op symbols, private vars: 1 vs. privatizer op symbols: 2}}
-  "omp.parallel"(%arg0) <{operandSegmentSizes = array<i32: 0, 0, 0, 0, 0, 1>, private_syms = [@x.privatizer, @y.privatizer]}> ({
+  "omp.parallel"(%arg0) <{operandSegmentSizes = array<i32: 0, 0, 0, 0, 1, 0>, private_syms = [@x.privatizer, @y.privatizer]}> ({
     ^bb0(%arg2: !llvm.ptr):
       omp.terminator
     }) : (!llvm.ptr) -> ()
@@ -2381,5 +2431,186 @@ func.func @masked_arg_count_mismatch(%arg0: i32, %arg1: i32) {
   "omp.masked"(%arg0, %arg1) ({
       omp.terminator
     }) : (i32, i32) -> ()
+  return
+}
+
+// -----
+func.func @omp_parallel_missing_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error@+1 {{'omp.composite' attribute missing from composite operation}}
+  omp.parallel {
+    omp.distribute {
+      omp.wsloop {
+        omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+          omp.yield
+        }
+        omp.terminator
+      } {omp.composite}
+      omp.terminator
+    } {omp.composite}
+    omp.terminator
+  }
+  return
+}
+
+// -----
+func.func @omp_parallel_invalid_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute present in non-composite operation}}
+  omp.parallel {
+    omp.wsloop {
+      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+        omp.yield
+      }
+      omp.terminator
+    }
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_parallel_invalid_composite2(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{unexpected OpenMP operation inside of composite 'omp.parallel'}}
+  omp.parallel {
+    omp.barrier
+    omp.distribute {
+      omp.wsloop {
+        omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+          omp.yield
+        }
+        omp.terminator
+      } {omp.composite}
+      omp.terminator
+    } {omp.composite}
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_wsloop_missing_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute missing from composite wrapper}}
+  omp.wsloop {
+    omp.simd {
+      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+        omp.yield
+      }
+      omp.terminator
+    } {omp.composite}
+    omp.terminator
+  }
+  return
+}
+
+// -----
+func.func @omp_wsloop_invalid_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute present in non-composite wrapper}}
+  omp.wsloop {
+    omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+      omp.yield
+    }
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_wsloop_missing_composite_2(%lb: index, %ub: index, %step: index) -> () {
+  omp.parallel {
+    omp.distribute {
+      // expected-error @below {{'omp.composite' attribute missing from composite wrapper}}
+      omp.wsloop {
+        omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+          omp.yield
+        }
+        omp.terminator
+      }
+      omp.terminator
+    } {omp.composite}
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_simd_missing_composite(%lb: index, %ub: index, %step: index) -> () {
+  omp.wsloop {
+    // expected-error @below {{'omp.composite' attribute missing from composite wrapper}}
+    omp.simd {
+      omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+        omp.yield
+      }
+      omp.terminator
+    }
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_simd_invalid_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute present in non-composite wrapper}}
+  omp.simd {
+    omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+      omp.yield
+    }
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_distribute_missing_composite(%lb: index, %ub: index, %step: index) -> () {
+  omp.parallel {
+    // expected-error @below {{'omp.composite' attribute missing from composite wrapper}}
+    omp.distribute {
+      omp.wsloop {
+        omp.loop_nest (%iv) : index = (%lb) to (%ub) step (%step) {
+          omp.yield
+        }
+        omp.terminator
+      } {omp.composite}
+      omp.terminator
+    }
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_distribute_invalid_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute present in non-composite wrapper}}
+  omp.distribute {
+    omp.loop_nest (%0) : index = (%lb) to (%ub) step (%step) {
+      omp.yield
+    }
+    omp.terminator
+  } {omp.composite}
+  return
+}
+
+// -----
+func.func @omp_taskloop_missing_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute missing from composite wrapper}}
+  omp.taskloop {
+    omp.simd {
+      omp.loop_nest (%i) : index = (%lb) to (%ub) step (%step)  {
+        omp.yield
+      }
+      omp.terminator
+    } {omp.composite}
+    omp.terminator
+  }
+  return
+}
+
+// -----
+func.func @omp_taskloop_invalid_composite(%lb: index, %ub: index, %step: index) -> () {
+  // expected-error @below {{'omp.composite' attribute present in non-composite wrapper}}
+  omp.taskloop {
+    omp.loop_nest (%i) : index = (%lb) to (%ub) step (%step)  {
+      omp.yield
+    }
+    omp.terminator
+  } {omp.composite}
   return
 }
